@@ -1,0 +1,200 @@
+// STOKIN - skema database
+// Uang disimpan sebagai Int (rupiah utuh). Cukup untuk UMKM; hindari Float untuk uang.
+// Semua tabel bisnis punya business_id (multi-tenant sederhana).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  OWNER
+  STAFF
+}
+
+enum TransactionType {
+  SALE
+  PURCHASE
+  STOCK_ADJUST
+  EXPENSE
+}
+
+enum MovementReason {
+  INITIAL
+  SALE
+  PURCHASE
+  ADJUSTMENT
+}
+
+enum FinancialType {
+  INCOME
+  EXPENSE
+}
+
+model Business {
+  id        String   @id @default(cuid())
+  name      String
+  type      String? // grosir/kelontong, retail, makanan, dll.
+  createdAt DateTime @default(now()) @map("created_at")
+
+  users            User[]
+  categories       Category[]
+  products         Product[]
+  transactions     Transaction[]
+  financialRecords FinancialRecord[]
+  notifications    Notification[]
+
+  @@map("businesses")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  businessId   String   @map("business_id")
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         Role     @default(STAFF)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([businessId])
+  @@map("users")
+}
+
+model Category {
+  id         String @id @default(cuid())
+  businessId String @map("business_id")
+  name       String
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  products Product[]
+
+  @@unique([businessId, name])
+  @@map("categories")
+}
+
+model Product {
+  id         String   @id @default(cuid())
+  businessId String   @map("business_id")
+  categoryId String?  @map("category_id")
+  name       String
+  sku        String?
+  unit       String   @default("pcs")
+  // costPrice = harga pokok rata-rata tertimbang (diperbarui otomatis saat pembelian)
+  costPrice  Int      @default(0) @map("cost_price")
+  sellPrice  Int      @default(0) @map("sell_price")
+  stock      Int      @default(0)
+  minStock   Int      @default(0) @map("min_stock")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  business      Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  category      Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  items         TransactionItem[]
+  movements     StockMovement[]
+  notifications Notification[]
+
+  @@unique([businessId, sku])
+  @@index([businessId, name])
+  @@map("products")
+}
+
+model Transaction {
+  id         String          @id @default(cuid())
+  businessId String          @map("business_id")
+  type       TransactionType
+  date       DateTime        @default(now())
+  total      Int             @default(0)
+  note       String?
+  createdBy  String          @map("created_by")
+  createdAt  DateTime        @default(now()) @map("created_at")
+
+  business         Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user             User              @relation(fields: [createdBy], references: [id])
+  items            TransactionItem[]
+  movements        StockMovement[]
+  financialRecords FinancialRecord[]
+
+  @@index([businessId, date])
+  @@index([businessId, type, date])
+  @@map("transactions")
+}
+
+model TransactionItem {
+  id            String @id @default(cuid())
+  transactionId String @map("transaction_id")
+  productId     String @map("product_id")
+  // Untuk STOCK_ADJUST, qty boleh negatif (selisih).
+  qty           Int
+  unitPrice     Int    @map("unit_price") // harga jual (SALE) / harga beli (PURCHASE)
+  // SNAPSHOT harga pokok saat transaksi, supaya laba historis tidak berubah
+  // ketika harga produk berubah di kemudian hari.
+  costPrice     Int    @default(0) @map("cost_price")
+  subtotal      Int
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  product     Product     @relation(fields: [productId], references: [id])
+
+  @@index([transactionId])
+  @@index([productId])
+  @@map("transaction_items")
+}
+
+// Audit trail setiap perubahan stok. stock_after memudahkan penelusuran selisih.
+model StockMovement {
+  id            String         @id @default(cuid())
+  productId     String         @map("product_id")
+  transactionId String?        @map("transaction_id")
+  qtyChange     Int            @map("qty_change")
+  stockAfter    Int            @map("stock_after")
+  reason        MovementReason
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  product     Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  transaction Transaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  @@index([productId, createdAt])
+  @@map("stock_movements")
+}
+
+model FinancialRecord {
+  id            String        @id @default(cuid())
+  businessId    String        @map("business_id")
+  transactionId String        @map("transaction_id")
+  type          FinancialType
+  // Contoh: PENJUALAN, PEMBELIAN_STOK, LISTRIK, GAJI, SEWA, LAINNYA
+  category      String
+  amount        Int
+  date          DateTime
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, date])
+  @@index([businessId, type, category])
+  @@map("financial_records")
+}
+
+model Notification {
+  id         String   @id @default(cuid())
+  businessId String   @map("business_id")
+  productId  String?  @map("product_id")
+  message    String
+  isRead     Boolean  @default(false) @map("is_read")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  product  Product? @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, isRead])
+  @@map("notifications")
+}
